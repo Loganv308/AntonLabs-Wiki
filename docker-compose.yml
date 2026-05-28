@@ -1,0 +1,20 @@
+services:
+
+  backend:
+    build: ./backend
+    container_name: wiki_backend
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - PORT=3001
+    ports:
+      - "3001:3001"
+
+  frontend:
+    build: ./frontend
+    container_name: wiki_frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "5173:80"

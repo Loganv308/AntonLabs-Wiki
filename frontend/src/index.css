@@ -1,0 +1,58 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #1a1b1e;
+  --bg2: #25262b;
+  --bg3: #2c2d33;
+  --border: rgba(255,255,255,0.08);
+  --border2: rgba(255,255,255,0.14);
+  --text: #c9cad4;
+  --text2: #8b8fa8;
+  --text3: #5c5f7a;
+  --accent: #5b7cf6;
+  --accent-dim: rgba(91,124,246,0.15);
+  --danger: #e05c5c;
+  --success: #4caf87;
+  --radius: 6px;
+  --radius-lg: 10px;
+  --mono: 'JetBrains Mono', 'Fira Mono', 'Cascadia Code', monospace;
+}
+
+html, body, #root { height: 100%; background: var(--bg); color: var(--text); font-family: var(--mono); font-size: 13px; }
+
+input, textarea, select {
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 7px 10px;
+  outline: none;
+  transition: border-color .15s;
+}
+input:focus, textarea:focus { border-color: var(--accent); }
+
+button {
+  font-family: var(--mono);
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: var(--radius);
+  border: 1px solid var(--border2);
+  background: transparent;
+  color: var(--text2);
+  padding: 6px 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: all .12s;
+}
+button:hover { background: var(--bg3); color: var(--text); }
+button.primary { border-color: var(--accent); color: var(--accent); }
+button.primary:hover { background: var(--accent-dim); }
+button.danger { border-color: var(--danger); color: var(--danger); }
+button.danger:hover { background: rgba(224,92,92,.1); }
+
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 99px; }
