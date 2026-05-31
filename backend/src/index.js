@@ -2,6 +2,17 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import pg from 'pg';
+import multer from 'multer';
+import JSZip from 'jszip';
+import { randomUUID } from 'crypto';
+import path from 'path';
+import fs from 'fs/promises';
+import { existsSync, mkdirSync } from 'fs';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const UPLOADS_DIR = process.env.UPLOADS_DIR || '/uploads';
+if (!existsSync(UPLOADS_DIR)) mkdirSync(UPLOADS_DIR, { recursive: true });
 
 const { Pool } = pg;
 const app = express();
@@ -10,7 +21,11 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
 app.use(cors());
 app.use(express.json());
+app.use('/uploads', express.static(UPLOADS_DIR));
 
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } });
+
+// ── Health ───────────────────────────────────────────────────────────────────
 app.get('/api/health', async (req, res) => {
   try { await pool.query('SELECT 1'); res.json({ ok: true }); }
   catch (e) { res.status(500).json({ ok: false, error: e.message }); }
@@ -32,6 +47,14 @@ app.get('/api/categories/tree', async (req, res) => {
     else roots.push(map[r.id]);
   });
   res.json(roots);
+});
+
+// All attachments (for sidebar)
+app.get('/api/attachments', async (req, res) => {
+  const { rows } = await pool.query(
+    'SELECT * FROM attachments ORDER BY created_at DESC'
+  );
+  res.json(rows);
 });
 
 app.post('/api/categories', async (req, res) => {
@@ -56,14 +79,12 @@ app.delete('/api/categories/:id', async (req, res) => {
   res.json({ ok: true });
 });
 
-// Move/reorder a category
 app.patch('/api/categories/:id/move', async (req, res) => {
   const { parent_id, sort_order } = req.body;
-  const id = req.params.id;
   try {
     const { rows } = await pool.query(
-      `UPDATE categories SET parent_id=$1, sort_order=$2 WHERE id=$3 RETURNING *`,
-      [parent_id ?? null, sort_order, id]
+      'UPDATE categories SET parent_id=$1, sort_order=$2 WHERE id=$3 RETURNING *',
+      [parent_id ?? null, sort_order, req.params.id]
     );
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -111,8 +132,7 @@ app.post('/api/pages', async (req, res) => {
   }
   if (!cat_id) return res.status(400).json({ error: 'category required' });
   const { rows: maxRows } = await pool.query(
-    'SELECT COALESCE(MAX(sort_order), 0) + 1 AS next FROM pages WHERE category_id=$1',
-    [cat_id]
+    'SELECT COALESCE(MAX(sort_order), 0) + 1 AS next FROM pages WHERE category_id=$1', [cat_id]
   );
   const { rows } = await pool.query(
     'INSERT INTO pages (title, content, category_id, sort_order) VALUES ($1, $2, $3, $4) RETURNING *',
@@ -143,10 +163,7 @@ app.put('/api/pages/:id', async (req, res) => {
   if (cat_id)                { fields.push(`category_id=$${i++}`); params.push(cat_id); }
   if (!fields.length) return res.status(400).json({ error: 'nothing to update' });
   params.push(id);
-  const { rows } = await pool.query(
-    `UPDATE pages SET ${fields.join(', ')} WHERE id=$${i} RETURNING *`, params
-  );
-  if (!rows.length) return res.status(404).json({ error: 'not found' });
+  await pool.query(`UPDATE pages SET ${fields.join(', ')} WHERE id=$${i} RETURNING *`, params);
   const full = await pool.query(
     'SELECT p.*, c.name AS category FROM pages p JOIN categories c ON c.id=p.category_id WHERE p.id=$1', [id]
   );
@@ -154,24 +171,193 @@ app.put('/api/pages/:id', async (req, res) => {
 });
 
 app.delete('/api/pages/:id', async (req, res) => {
+  const { rows } = await pool.query('SELECT path FROM attachments WHERE page_id=$1', [req.params.id]);
+  for (const r of rows) await fs.unlink(r.path).catch(() => {});
   await pool.query('DELETE FROM pages WHERE id=$1', [req.params.id]);
   res.json({ ok: true });
 });
 
-// Move/reorder a page
 app.patch('/api/pages/:id/move', async (req, res) => {
   const { category_id, sort_order } = req.body;
-  const id = req.params.id;
   try {
-    const { rows } = await pool.query(
-      `UPDATE pages SET category_id=$1, sort_order=$2 WHERE id=$3 RETURNING *`,
-      [category_id, sort_order, id]
+    await pool.query(
+      'UPDATE pages SET category_id=$1, sort_order=$2 WHERE id=$3',
+      [category_id, sort_order, req.params.id]
     );
     const full = await pool.query(
-      'SELECT p.*, c.name AS category FROM pages p JOIN categories c ON c.id=p.category_id WHERE p.id=$1', [id]
+      'SELECT p.*, c.name AS category FROM pages p JOIN categories c ON c.id=p.category_id WHERE p.id=$1',
+      [req.params.id]
     );
     res.json(full.rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Attachments ───────────────────────────────────────────────────────────────
+app.get('/api/attachments/:pageId', async (req, res) => {
+  const { rows } = await pool.query(
+    'SELECT * FROM attachments WHERE page_id=$1 ORDER BY created_at',
+    [req.params.pageId]
+  );
+  res.json(rows);
+});
+
+app.delete('/api/attachments/:id', async (req, res) => {
+  const { rows } = await pool.query('SELECT path FROM attachments WHERE id=$1', [req.params.id]);
+  if (rows[0]) await fs.unlink(rows[0].path).catch(() => {});
+  await pool.query('DELETE FROM attachments WHERE id=$1', [req.params.id]);
+  res.json({ ok: true });
+});
+
+// ── Import helpers ────────────────────────────────────────────────────────────
+async function upsertCategory(name, parentId, client) {
+  const { rows: maxRows } = await client.query(
+    'SELECT COALESCE(MAX(sort_order), 0) + 1 AS next FROM categories WHERE parent_id IS NOT DISTINCT FROM $1',
+    [parentId || null]
+  );
+  const { rows } = await client.query(
+    `INSERT INTO categories (name, parent_id, sort_order) VALUES ($1, $2, $3)
+     ON CONFLICT (name, parent_id) DO UPDATE SET name=EXCLUDED.name RETURNING *`,
+    [name, parentId || null, maxRows[0].next]
+  );
+  return rows[0];
+}
+
+async function parseImportFiles(files) {
+  const mdFiles = [];
+  const assetFiles = [];
+  for (const file of files) {
+    if (file.originalname.endsWith('.zip')) {
+      const zip = await JSZip.loadAsync(file.buffer);
+      for (const [zipPath, zipEntry] of Object.entries(zip.files)) {
+        if (zipEntry.dir) continue;
+        const buf = await zipEntry.async('nodebuffer');
+        const name = path.basename(zipPath);
+        const ext = path.extname(name).toLowerCase();
+        if (ext === '.md') {
+          mdFiles.push({ path: zipPath, name: name.replace(/\.md$/, ''), content: buf.toString('utf8') });
+        } else if (['.png','.jpg','.jpeg','.gif','.webp','.svg','.pdf'].includes(ext)) {
+          assetFiles.push({ name, buffer: buf });
+        }
+      }
+    } else if (file.originalname.endsWith('.md')) {
+      mdFiles.push({ path: file.originalname, name: file.originalname.replace(/\.md$/, ''), content: file.buffer.toString('utf8') });
+    } else {
+      const ext = path.extname(file.originalname).toLowerCase();
+      if (['.png','.jpg','.jpeg','.gif','.webp','.svg','.pdf'].includes(ext)) {
+        assetFiles.push({ name: file.originalname, buffer: file.buffer });
+      }
+    }
+  }
+  return { mdFiles, assetFiles };
+}
+
+function inferCategory(filePath) {
+  const parts = filePath.split('/').filter(Boolean);
+  if (parts.length <= 1) return 'Imported';
+  return parts.slice(0, -1).join(' / ');
+}
+
+// ── Import endpoints ──────────────────────────────────────────────────────────
+app.post('/api/import/preview', upload.array('files'), async (req, res) => {
+  try {
+    const { mdFiles, assetFiles } = await parseImportFiles(req.files);
+    res.json({
+      pages: mdFiles.map(f => ({
+        name: f.name,
+        path: f.path,
+        category: inferCategory(f.path),
+        contentLength: f.content.length,
+      })),
+      assets: assetFiles.map(a => ({ name: a.name, size: a.buffer.length })),
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/import', upload.array('files'), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { mdFiles, assetFiles } = await parseImportFiles(req.files);
+    const catCache = {};
+
+    async function getCategoryForPath(filePath) {
+      const parts = filePath.split('/').filter(Boolean).slice(0, -1);
+      if (!parts.length) {
+        const cat = await upsertCategory('Imported', null, client);
+        return cat.id;
+      }
+      let parentId = null;
+      let cacheKey = '';
+      for (const part of parts) {
+        cacheKey = cacheKey ? `${cacheKey}/${part}` : part;
+        if (!catCache[cacheKey]) {
+          const cat = await upsertCategory(part, parentId, client);
+          catCache[cacheKey] = cat.id;
+        }
+        parentId = catCache[cacheKey];
+      }
+      return parentId;
+    }
+
+    // Save assets first, build name -> url map
+    const assetMap = {};
+    for (const asset of assetFiles) {
+      const ext = path.extname(asset.name);
+      const filename = `${randomUUID()}${ext}`;
+      const filePath = path.join(UPLOADS_DIR, filename);
+      await fs.writeFile(filePath, asset.buffer);
+      assetMap[asset.name] = `/uploads/${filename}`;
+    }
+
+    // Save pages, rewriting Obsidian ![[links]]
+    const results = [];
+    for (const f of mdFiles) {
+      const catId = await getCategoryForPath(f.path);
+      const { rows: maxRows } = await client.query(
+        'SELECT COALESCE(MAX(sort_order), 0) + 1 AS next FROM pages WHERE category_id=$1', [catId]
+      );
+
+      let content = f.content;
+      content = content.replace(/!\[\[([^\]]+)\]\]/g, (_, name) => {
+        const url = assetMap[name] || assetMap[path.basename(name)];
+        if (!url) return `\`[missing: ${name}]\``;
+        const ext = path.extname(name).toLowerCase();
+        return ['.png','.jpg','.jpeg','.gif','.webp','.svg'].includes(ext)
+          ? `![${name}](${url})`
+          : `[${name}](${url})`;
+      });
+
+      const { rows } = await client.query(
+        'INSERT INTO pages (title, content, category_id, sort_order) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING RETURNING *',
+        [f.name, content, catId, maxRows[0].next]
+      );
+
+      if (rows[0]) {
+        // Record attachments referenced by this page
+        for (const asset of assetFiles.filter(a => f.content.includes(a.name))) {
+          const url = assetMap[asset.name];
+          if (!url) continue;
+          const filename = path.basename(url);
+          const filePath = path.join(UPLOADS_DIR, filename);
+          const ext = path.extname(asset.name).toLowerCase();
+          const mime = ext === '.pdf' ? 'application/pdf' : `image/${ext.slice(1).replace('jpg', 'jpeg')}`;
+          await client.query(
+            'INSERT INTO attachments (page_id, filename, original_name, mime_type, size, path) VALUES ($1,$2,$3,$4,$5,$6)',
+            [rows[0].id, filename, asset.name, mime, asset.buffer.length, filePath]
+          );
+        }
+        results.push({ id: rows[0].id, title: f.name });
+      }
+    }
+
+    await client.query('COMMIT');
+    res.json({ imported: results.length, pages: results });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
+  }
 });
 
 app.listen(port, () => console.log(`Wiki API listening on :${port}`));

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from './api.js';
 import { mdToHtml } from './markdown.js';
+import Import from './Import.jsx';
 
 const css = String.raw;
 
@@ -82,6 +83,63 @@ const styles = css`
     background: transparent; transition: background .1s;
   }
   .drop-zone.active { background: var(--accent); }
+
+  /* ── Attachments sidebar section ── */
+  .attach-section { border-top: 1px solid var(--border); flex-shrink: 0; }
+  .attach-section-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 6px 12px 3px;
+    font-size: 10px; font-weight: 600; color: var(--text3);
+    letter-spacing: .1em; text-transform: uppercase;
+    cursor: pointer; user-select: none;
+  }
+  .attach-section-header:hover { color: var(--text2); }
+  .attach-list { overflow: hidden; max-height: 200px; overflow-y: auto; }
+  .attach-row {
+    display: flex; align-items: center; gap: 7px;
+    padding: 5px 12px 5px 20px;
+    font-size: 11px; color: var(--text2);
+    cursor: pointer;
+    border-left: 2px solid transparent;
+    transition: all .1s;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .attach-row:hover { background: var(--bg3); color: var(--text); }
+  .attach-row.active { color: var(--accent); border-left-color: var(--accent); background: var(--accent-dim); }
+  .attach-row svg { flex-shrink: 0; opacity: .5; }
+  .attach-badge {
+    font-size: 9px; padding: 1px 4px; border-radius: 3px; flex-shrink: 0;
+    background: var(--bg3); color: var(--text3);
+  }
+  .attach-badge.img { background: #1a3a2a; color: #4ade80; }
+  .attach-badge.pdf { background: #3a1a1a; color: #f87171; }
+
+  /* ── Preview modal ── */
+  .preview-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,.75);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 100; padding: 24px;
+  }
+  .preview-modal {
+    background: var(--bg2); border: 1px solid var(--border2);
+    border-radius: var(--radius-lg); overflow: hidden;
+    display: flex; flex-direction: column;
+    max-width: 90vw; max-height: 90vh; min-width: 320px;
+  }
+  .preview-modal-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 16px; border-bottom: 1px solid var(--border);
+    font-size: 12px; font-weight: 600; color: var(--text);
+  }
+  .preview-modal-header span { color: var(--text3); font-weight: 400; font-size: 11px; margin-left: 8px; }
+  .preview-modal-body { flex: 1; overflow: auto; display: flex; align-items: center; justify-content: center; padding: 16px; }
+  .preview-modal-body img { max-width: 100%; max-height: 70vh; border-radius: 6px; object-fit: contain; }
+  .preview-modal-body iframe { width: 75vw; height: 75vh; border: none; border-radius: 6px; }
+  .preview-close {
+    background: none; border: none; cursor: pointer; padding: 4px;
+    color: var(--text3); border-radius: 4px; display: flex; align-items: center;
+  }
+  .preview-close:hover { background: var(--bg3); color: var(--text); }
 
   .sidebar-btns {
     display: flex; gap: 6px; padding: 8px 10px;
@@ -173,12 +231,15 @@ const ICONS = {
   za:      'M3 7l4 8-4 8 M5.5 11h3 M17 7v10 M14 14l3 3 3-3',
   manual:  'M12 3v18 M8 7l4-4 4 4 M8 17l4 4 4-4',
   recent:  'M12 8v4l3 3 M3.05 11a9 9 0 1 0 .5-3',
+  image:   'M21 15l-5-5L5 21 M3 3h18v18H3z M8.5 8.5a1 1 0 1 0 0-2 1 1 0 0 0 0 2',
+  pdf:     'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6 M9 13h6 M9 17h3',
+  paperclip: 'M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66L9.41 17.41a2 2 0 0 1-2.83-2.83l8.49-8.48',
 };
 
 const SORT_MODES = [
-  { key: 'manual',     label: 'Manual',       icon: ICONS.manual },
-  { key: 'alpha-asc',  label: 'A → Z',        icon: ICONS.az },
-  { key: 'alpha-desc', label: 'Z → A',        icon: ICONS.za },
+  { key: 'manual',     label: 'Manual',           icon: ICONS.manual },
+  { key: 'alpha-asc',  label: 'A → Z',            icon: ICONS.az },
+  { key: 'alpha-desc', label: 'Z → A',            icon: ICONS.za },
   { key: 'recent',     label: 'Recently updated', icon: ICONS.recent },
 ];
 
@@ -203,6 +264,106 @@ function sortGroups(groups, mode) {
   return [...groups].sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
 }
 
+function attachBadgeType(mimeType) {
+  if (mimeType.startsWith('image/')) return 'img';
+  if (mimeType === 'application/pdf') return 'pdf';
+  return 'other';
+}
+
+// ── Preview Modal ─────────────────────────────────────────────────────────────
+function PreviewModal({ attachment, onClose }) {
+  const isImage = attachment.mime_type.startsWith('image/');
+  const isPdf   = attachment.mime_type === 'application/pdf';
+  const url     = `/uploads/${attachment.filename}`;
+
+  useEffect(() => {
+    function onKey(e) { if (e.key === 'Escape') onClose(); }
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  return (
+    <div className="preview-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="preview-modal">
+        <div className="preview-modal-header">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Icon d={isImage ? ICONS.image : ICONS.pdf} size={14} />
+            {attachment.original_name}
+            <span>{isImage ? 'Image' : 'PDF'}</span>
+          </div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <a href={url} target="_blank" rel="noreferrer"
+              style={{ fontSize: 11, color: 'var(--accent)', textDecoration: 'none', padding: '4px 8px', borderRadius: 4, border: '1px solid var(--border)' }}>
+              Open
+            </a>
+            <button className="preview-close" onClick={onClose}>
+              <Icon d={ICONS.x} size={14} />
+            </button>
+          </div>
+        </div>
+        <div className="preview-modal-body">
+          {isImage && <img src={url} alt={attachment.original_name} />}
+          {isPdf   && <iframe src={url} title={attachment.original_name} />}
+          {!isImage && !isPdf && (
+            <p style={{ color: 'var(--text3)', fontSize: 12 }}>Preview not available. <a href={url} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>Download file</a></p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Sidebar Attachments Section ───────────────────────────────────────────────
+function SidebarAttachments({ onPreview }) {
+  const [attachments, setAttachments] = useState([]);
+  const [open, setOpen] = useState(true);
+  const [activeId, setActiveId] = useState(null);
+
+  useEffect(() => {
+    api.allAttachments().then(setAttachments).catch(() => {});
+  }, []);
+
+  if (!attachments.length) return null;
+
+  return (
+    <div className="attach-section">
+      <div className="attach-section-header" onClick={() => setOpen(o => !o)}>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+          <Icon d={ICONS.paperclip} size={11} />
+          Files
+          <span style={{ fontSize: 9, background: 'var(--bg3)', borderRadius: 3, padding: '1px 4px', color: 'var(--text3)' }}>
+            {attachments.length}
+          </span>
+        </span>
+        <span className={`cat-arrow ${open ? 'open' : ''}`}>
+          <Icon d={ICONS.chevron} size={11} />
+        </span>
+      </div>
+      {open && (
+        <div className="attach-list">
+          {attachments.map(a => {
+            const type = attachBadgeType(a.mime_type);
+            return (
+              <div
+                key={a.id}
+                className={`attach-row${activeId === a.id ? ' active' : ''}`}
+                onClick={() => { setActiveId(a.id); onPreview(a); }}
+                title={a.original_name}
+              >
+                <Icon d={type === 'img' ? ICONS.image : ICONS.pdf} size={12} />
+                <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {a.original_name}
+                </span>
+                <span className={`attach-badge ${type}`}>{type}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── TreeNode ─────────────────────────────────────────────────────────────────
 function TreeNode({ node, pages, current, collapsed, onToggle, onSelect, depth,
                     sortMode, onDrop, dragState, setDragState }) {
@@ -217,29 +378,17 @@ function TreeNode({ node, pages, current, collapsed, onToggle, onSelect, depth,
     setDragState({ type: 'group', id: node.id, parentId: node.parent_id });
     e.dataTransfer.effectAllowed = 'move';
   }
-
   function onGroupDragOver(e) {
-    e.preventDefault();
-    e.stopPropagation();
-    if (dragState.id !== node.id) {
-      setDragState(s => ({ ...s, overGroup: node.id }));
-    }
+    e.preventDefault(); e.stopPropagation();
+    if (dragState.id !== node.id) setDragState(s => ({ ...s, overGroup: node.id }));
   }
-
   function onGroupDrop(e) {
-    e.preventDefault();
-    e.stopPropagation();
-    if (dragState.type === 'page') {
-      onDrop({ type: 'page-to-group', pageId: dragState.id, groupId: node.id });
-    } else if (dragState.type === 'group' && dragState.id !== node.id) {
-      onDrop({ type: 'group-into-group', groupId: dragState.id, parentId: node.id });
-    }
+    e.preventDefault(); e.stopPropagation();
+    if (dragState.type === 'page') onDrop({ type: 'page-to-group', pageId: dragState.id, groupId: node.id });
+    else if (dragState.type === 'group' && dragState.id !== node.id) onDrop({ type: 'group-into-group', groupId: dragState.id, parentId: node.id });
     setDragState({});
   }
-
-  function onGroupDragLeave() {
-    setDragState(s => ({ ...s, overGroup: null }));
-  }
+  function onGroupDragLeave() { setDragState(s => ({ ...s, overGroup: null })); }
 
   return (
     <div>
@@ -275,26 +424,12 @@ function TreeNode({ node, pages, current, collapsed, onToggle, onSelect, depth,
               active={dragState.overZone === `group-${node.id}-${idx}`}
               onDragOver={() => setDragState(s => ({ ...s, overZone: `group-${node.id}-${idx}` }))}
               onDragLeave={() => setDragState(s => ({ ...s, overZone: null }))}
-              onDrop={() => {
-                if (dragState.type === 'group') {
-                  onDrop({ type: 'group-reorder', groupId: dragState.id, parentId: node.id, beforeId: child.id });
-                }
-                setDragState({});
-              }}
+              onDrop={() => { if (dragState.type === 'group') onDrop({ type: 'group-reorder', groupId: dragState.id, parentId: node.id, beforeId: child.id }); setDragState({}); }}
             />
             <TreeNode
-              key={child.id}
-              node={child}
-              pages={pages}
-              current={current}
-              collapsed={collapsed}
-              onToggle={onToggle}
-              onSelect={onSelect}
-              depth={depth + 1}
-              sortMode={sortMode}
-              onDrop={onDrop}
-              dragState={dragState}
-              setDragState={setDragState}
+              node={child} pages={pages} current={current} collapsed={collapsed}
+              onToggle={onToggle} onSelect={onSelect} depth={depth + 1}
+              sortMode={sortMode} onDrop={onDrop} dragState={dragState} setDragState={setDragState}
             />
           </React.Fragment>
         ))}
@@ -307,11 +442,8 @@ function TreeNode({ node, pages, current, collapsed, onToggle, onSelect, depth,
               onDragOver={() => setDragState(s => ({ ...s, overZone: `page-${node.id}-${idx}` }))}
               onDragLeave={() => setDragState(s => ({ ...s, overZone: null }))}
               onDrop={() => {
-                if (dragState.type === 'page') {
-                  onDrop({ type: 'page-reorder', pageId: dragState.id, groupId: node.id, beforeId: p.id });
-                } else if (dragState.type === 'group') {
-                  onDrop({ type: 'group-reorder', groupId: dragState.id, parentId: node.id, beforeId: null });
-                }
+                if (dragState.type === 'page') onDrop({ type: 'page-reorder', pageId: dragState.id, groupId: node.id, beforeId: p.id });
+                else if (dragState.type === 'group') onDrop({ type: 'group-reorder', groupId: dragState.id, parentId: node.id, beforeId: null });
                 setDragState({});
               }}
             />
@@ -324,35 +456,27 @@ function TreeNode({ node, pages, current, collapsed, onToggle, onSelect, depth,
               onClick={() => onSelect(p)}
               title={p.title}
             >
-              {sortMode === 'manual' && (
-                <span className="drag-handle"><Icon d={ICONS.grip} size={11} /></span>
-              )}
+              {sortMode === 'manual' && <span className="drag-handle"><Icon d={ICONS.grip} size={11} /></span>}
               <Icon d={ICONS.file} size={12} />
               {p.title}
             </div>
           </React.Fragment>
         ))}
 
-        {/* Drop zone at end of group */}
         <DropZone
           show={sortMode === 'manual'}
           active={dragState.overZone === `end-${node.id}`}
           onDragOver={() => setDragState(s => ({ ...s, overZone: `end-${node.id}` }))}
           onDragLeave={() => setDragState(s => ({ ...s, overZone: null }))}
           onDrop={() => {
-            if (dragState.type === 'page') {
-              onDrop({ type: 'page-reorder', pageId: dragState.id, groupId: node.id, beforeId: null });
-            } else if (dragState.type === 'group') {
-              onDrop({ type: 'group-reorder', groupId: dragState.id, parentId: node.id, beforeId: null });
-            }
+            if (dragState.type === 'page') onDrop({ type: 'page-reorder', pageId: dragState.id, groupId: node.id, beforeId: null });
+            else if (dragState.type === 'group') onDrop({ type: 'group-reorder', groupId: dragState.id, parentId: node.id, beforeId: null });
             setDragState({});
           }}
         />
 
         {!sortedChildren.length && !nodePages.length && (
-          <div style={{ paddingLeft: 28 + indent, fontSize: 11, color: 'var(--text3)', padding: `4px 12px 4px ${28 + indent}px` }}>
-            Empty
-          </div>
+          <div style={{ paddingLeft: 28 + indent, fontSize: 11, color: 'var(--text3)', padding: `4px 12px 4px ${28 + indent}px` }}>Empty</div>
         )}
       </div>
     </div>
@@ -373,6 +497,7 @@ function DropZone({ show, active, onDragOver, onDragLeave, onDrop }) {
 
 // ── App ───────────────────────────────────────────────────────────────────────
 export default function App() {
+  const [showImport, setShowImport] = useState(false);
   const [pages, setPages] = useState([]);
   const [tree, setTree] = useState([]);
   const [current, setCurrent] = useState(null);
@@ -390,6 +515,7 @@ export default function App() {
   const [sortMode, setSortMode] = useState('manual');
   const [showSortMenu, setShowSortMenu] = useState(false);
   const [dragState, setDragState] = useState({});
+  const [previewAttachment, setPreviewAttachment] = useState(null);
   const searchTimer = useRef(null);
   const sortMenuRef = useRef(null);
 
@@ -407,7 +533,6 @@ export default function App() {
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
-  // Close sort menu on outside click
   useEffect(() => {
     function handler(e) {
       if (sortMenuRef.current && !sortMenuRef.current.contains(e.target)) setShowSortMenu(false);
@@ -425,45 +550,29 @@ export default function App() {
   const flatCats = flattenTree(tree);
   const sortedTopLevel = sortGroups(tree, sortMode);
 
-  // ── Drag & drop handler ────────────────────────────────────────────────────
   async function handleDrop(action) {
     if (action.type === 'page-to-group') {
-      // Move page to a different group, append at end
       const groupPages = pages.filter(p => p.category_id === action.groupId);
       const maxOrder = groupPages.reduce((m, p) => Math.max(m, p.sort_order ?? 0), 0);
       await api.movePage(action.pageId, action.groupId, maxOrder + 1);
-
     } else if (action.type === 'page-reorder') {
-      // Reorder page within or across groups
-      const groupPages = sortPages(
-        pages.filter(p => p.category_id === action.groupId), 'manual'
-      );
+      const groupPages = sortPages(pages.filter(p => p.category_id === action.groupId), 'manual');
       const withoutDragged = groupPages.filter(p => p.id !== action.pageId);
       const insertIdx = action.beforeId ? withoutDragged.findIndex(p => p.id === action.beforeId) : withoutDragged.length;
       const reordered = [...withoutDragged.slice(0, insertIdx), { id: action.pageId }, ...withoutDragged.slice(insertIdx)];
       await Promise.all(reordered.map((p, i) => api.movePage(p.id, action.groupId, i)));
-
     } else if (action.type === 'group-into-group') {
-      // Move group under a new parent
       const siblings = tree.filter(n => n.parent_id === action.parentId);
       const maxOrder = siblings.reduce((m, n) => Math.max(m, n.sort_order ?? 0), 0);
       await api.moveCategory(action.groupId, action.parentId, maxOrder + 1);
-
     } else if (action.type === 'group-reorder') {
-      // Reorder groups within the same parent
       const allCats = flattenTree(tree).map(f => ({ ...f }));
-      const siblings = sortGroups(
-        allCats.filter(c => {
-          const node = findNode(tree, c.id);
-          return node?.parent_id === action.parentId;
-        }), 'manual'
-      );
+      const siblings = sortGroups(allCats.filter(c => { const node = findNode(tree, c.id); return node?.parent_id === action.parentId; }), 'manual');
       const withoutDragged = siblings.filter(c => c.id !== action.groupId);
       const insertIdx = action.beforeId ? withoutDragged.findIndex(c => c.id === action.beforeId) : withoutDragged.length;
       const reordered = [...withoutDragged.slice(0, insertIdx), { id: action.groupId }, ...withoutDragged.slice(insertIdx)];
       await Promise.all(reordered.map((c, i) => api.moveCategory(c.id, action.parentId ?? null, i)));
     }
-
     await loadAll(search);
   }
 
@@ -526,6 +635,13 @@ export default function App() {
   const toggleCat = (id) => setCollapsed(c => ({ ...c, [id]: !c[id] }));
   const currentSort = SORT_MODES.find(m => m.key === sortMode);
 
+  if (showImport) return (
+    <Import
+      onBack={() => setShowImport(false)}
+      onImported={() => { loadAll(); setShowImport(false); }}
+    />
+  );
+
   return (
     <>
       <style>{styles}</style>
@@ -536,29 +652,23 @@ export default function App() {
             <Icon d={ICONS.book} size={16} />
             AntonLabs Wiki
             <div className="sidebar-header-right" ref={sortMenuRef} style={{ position: 'relative' }}>
-              <button
-                className={`sort-btn${sortMode !== 'manual' ? ' active' : ''}`}
-                onClick={() => setShowSortMenu(s => !s)}
-                title="Sort order"
-              >
+              <button className={`sort-btn${sortMode !== 'manual' ? ' active' : ''}`} onClick={() => setShowSortMenu(s => !s)} title="Sort order">
                 <Icon d={ICONS.sort} size={12} />
                 {currentSort.label}
               </button>
               {showSortMenu && (
                 <div className="sort-menu">
                   {SORT_MODES.map(m => (
-                    <div
-                      key={m.key}
-                      className={`sort-option${sortMode === m.key ? ' active' : ''}`}
-                      onClick={() => { setSortMode(m.key); setShowSortMenu(false); }}
-                    >
-                      <Icon d={m.icon} size={12} />
-                      {m.label}
+                    <div key={m.key} className={`sort-option${sortMode === m.key ? ' active' : ''}`} onClick={() => { setSortMode(m.key); setShowSortMenu(false); }}>
+                      <Icon d={m.icon} size={12} /> {m.label}
                     </div>
                   ))}
                 </div>
               )}
             </div>
+            <button className="sort-btn" onClick={() => setShowImport(true)} title="Import from Obsidian">
+              <Icon d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M17 8l-5-5-5 5 M12 3v12" size={12} />
+            </button>
           </div>
 
           <div className="search-wrap">
@@ -575,25 +685,12 @@ export default function App() {
                   active={dragState.overZone === `top-${idx}`}
                   onDragOver={() => setDragState(s => ({ ...s, overZone: `top-${idx}` }))}
                   onDragLeave={() => setDragState(s => ({ ...s, overZone: null }))}
-                  onDrop={() => {
-                    if (dragState.type === 'group') {
-                      handleDrop({ type: 'group-reorder', groupId: dragState.id, parentId: null, beforeId: node.id });
-                    }
-                    setDragState({});
-                  }}
+                  onDrop={() => { if (dragState.type === 'group') handleDrop({ type: 'group-reorder', groupId: dragState.id, parentId: null, beforeId: node.id }); setDragState({}); }}
                 />
                 <TreeNode
-                  node={node}
-                  pages={pages}
-                  current={current}
-                  collapsed={collapsed}
-                  onToggle={toggleCat}
-                  onSelect={selectPage}
-                  depth={0}
-                  sortMode={sortMode}
-                  onDrop={handleDrop}
-                  dragState={dragState}
-                  setDragState={setDragState}
+                  node={node} pages={pages} current={current} collapsed={collapsed}
+                  onToggle={toggleCat} onSelect={selectPage} depth={0}
+                  sortMode={sortMode} onDrop={handleDrop} dragState={dragState} setDragState={setDragState}
                 />
               </React.Fragment>
             ))}
@@ -602,14 +699,12 @@ export default function App() {
               active={dragState.overZone === 'top-end'}
               onDragOver={() => setDragState(s => ({ ...s, overZone: 'top-end' }))}
               onDragLeave={() => setDragState(s => ({ ...s, overZone: null }))}
-              onDrop={() => {
-                if (dragState.type === 'group') {
-                  handleDrop({ type: 'group-reorder', groupId: dragState.id, parentId: null, beforeId: null });
-                }
-                setDragState({});
-              }}
+              onDrop={() => { if (dragState.type === 'group') handleDrop({ type: 'group-reorder', groupId: dragState.id, parentId: null, beforeId: null }); setDragState({}); }}
             />
           </div>
+
+          {/* ── Attachments section ── */}
+          <SidebarAttachments onPreview={setPreviewAttachment} />
 
           <div className="sidebar-btns">
             <button className="new-btn" onClick={() => setGroupModal(true)}>
@@ -645,15 +740,15 @@ export default function App() {
           </div>
           <div className="content">
             {!current && <div className="empty"><Icon d={ICONS.book} size={36} /><p>Select a page or create a new one</p></div>}
-            {current && !editing && <div className="viewer" dangerouslySetInnerHTML={{ __html: mdToHtml(current.content) }} />}
+            {current && !editing && (
+              <div className="viewer" dangerouslySetInnerHTML={{ __html: mdToHtml(current.content) }} />
+            )}
             {current && editing && (
               <div className="editor">
                 <div className="editor-meta">
                   <select value={editData.category_id || ''} onChange={e => setEditData(d => ({ ...d, category_id: e.target.value }))}>
                     <option value="">Select group…</option>
-                    {flatCats.map(c => (
-                      <option key={c.id} value={c.id}>{'  '.repeat(c.depth)}{c.depth > 0 ? '└ ' : ''}{c.name}</option>
-                    ))}
+                    {flatCats.map(c => <option key={c.id} value={c.id}>{'  '.repeat(c.depth)}{c.depth > 0 ? '└ ' : ''}{c.name}</option>)}
                   </select>
                   <input value={editData.title} onChange={e => setEditData(d => ({ ...d, title: e.target.value }))} placeholder="Page title" />
                 </div>
@@ -664,6 +759,11 @@ export default function App() {
           </div>
         </div>
       </div>
+
+      {/* ── Preview modal ── */}
+      {previewAttachment && (
+        <PreviewModal attachment={previewAttachment} onClose={() => setPreviewAttachment(null)} />
+      )}
 
       {/* ── New page modal ── */}
       {pageModal && (

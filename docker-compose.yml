@@ -11,6 +11,7 @@ services:
       - "3001:3001"
     volumes:
       - ./backend/src:/app/src
+      - ./uploads:/uploads 
     command: npx nodemon src/index.js
 
   frontend:
@@ -26,5 +27,5 @@ services:
     volumes:
       - ./frontend/src:/app/src
       - ./frontend/index.html:/app/index.html
-      - ./frontend/vite.config.js:/app/vite.config.js    # ← add this
+      - ./frontend/vite.config.js:/app/vite.config.js
     command: npx vite --host 0.0.0.0 --port 5173
