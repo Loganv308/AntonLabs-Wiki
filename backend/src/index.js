@@ -25,6 +25,15 @@ app.use('/uploads', express.static(UPLOADS_DIR));
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } });
 
+function getMime(ext) {
+  const map = {
+    '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
+    '.pdf': 'application/pdf',
+  };
+  return map[ext.toLowerCase()] || 'application/octet-stream';
+}
+
 // ── Health ───────────────────────────────────────────────────────────────────
 app.get('/api/health', async (req, res) => {
   try { await pool.query('SELECT 1'); res.json({ ok: true }); }
@@ -47,14 +56,6 @@ app.get('/api/categories/tree', async (req, res) => {
     else roots.push(map[r.id]);
   });
   res.json(roots);
-});
-
-// All attachments (for sidebar)
-app.get('/api/attachments', async (req, res) => {
-  const { rows } = await pool.query(
-    'SELECT * FROM attachments ORDER BY created_at DESC'
-  );
-  res.json(rows);
 });
 
 app.post('/api/categories', async (req, res) => {
@@ -193,6 +194,15 @@ app.patch('/api/pages/:id/move', async (req, res) => {
 });
 
 // ── Attachments ───────────────────────────────────────────────────────────────
+
+// All attachments — must come BEFORE /:pageId route
+app.get('/api/attachments/all', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM attachments ORDER BY created_at DESC');
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/attachments/:pageId', async (req, res) => {
   const { rows } = await pool.query(
     'SELECT * FROM attachments WHERE page_id=$1 ORDER BY created_at',
@@ -210,13 +220,17 @@ app.delete('/api/attachments/:id', async (req, res) => {
 
 // ── Import helpers ────────────────────────────────────────────────────────────
 async function upsertCategory(name, parentId, client) {
+  const existing = await client.query(
+    'SELECT * FROM categories WHERE name=$1 AND parent_id IS NOT DISTINCT FROM $2',
+    [name, parentId || null]
+  );
+  if (existing.rows.length) return existing.rows[0];
   const { rows: maxRows } = await client.query(
     'SELECT COALESCE(MAX(sort_order), 0) + 1 AS next FROM categories WHERE parent_id IS NOT DISTINCT FROM $1',
     [parentId || null]
   );
   const { rows } = await client.query(
-    `INSERT INTO categories (name, parent_id, sort_order) VALUES ($1, $2, $3)
-     ON CONFLICT (name, parent_id) DO UPDATE SET name=EXCLUDED.name RETURNING *`,
+    'INSERT INTO categories (name, parent_id, sort_order) VALUES ($1, $2, $3) RETURNING *',
     [name, parentId || null, maxRows[0].next]
   );
   return rows[0];
@@ -236,15 +250,19 @@ async function parseImportFiles(files) {
         if (ext === '.md') {
           mdFiles.push({ path: zipPath, name: name.replace(/\.md$/, ''), content: buf.toString('utf8') });
         } else if (['.png','.jpg','.jpeg','.gif','.webp','.svg','.pdf'].includes(ext)) {
-          assetFiles.push({ name, buffer: buf });
+          assetFiles.push({ name, zipPath, buffer: buf });
         }
       }
-    } else if (file.originalname.endsWith('.md')) {
-      mdFiles.push({ path: file.originalname, name: file.originalname.replace(/\.md$/, ''), content: file.buffer.toString('utf8') });
+    } else if (file.originalname.toLowerCase().endsWith('.md')) {
+      mdFiles.push({
+        path: file.originalname,
+        name: file.originalname.replace(/\.md$/, ''),
+        content: file.buffer.toString('utf8')
+      });
     } else {
       const ext = path.extname(file.originalname).toLowerCase();
       if (['.png','.jpg','.jpeg','.gif','.webp','.svg','.pdf'].includes(ext)) {
-        assetFiles.push({ name: file.originalname, buffer: file.buffer });
+        assetFiles.push({ name: file.originalname, zipPath: file.originalname, buffer: file.buffer });
       }
     }
   }
@@ -278,13 +296,19 @@ app.post('/api/import', upload.array('files'), async (req, res) => {
   try {
     await client.query('BEGIN');
     const { mdFiles, assetFiles } = await parseImportFiles(req.files);
+
+    // Single shared "Imported" category cache across all files
     const catCache = {};
 
     async function getCategoryForPath(filePath) {
       const parts = filePath.split('/').filter(Boolean).slice(0, -1);
       if (!parts.length) {
-        const cat = await upsertCategory('Imported', null, client);
-        return cat.id;
+        // All flat files share one "Imported" group
+        if (!catCache['__imported__']) {
+          const cat = await upsertCategory('Imported', null, client);
+          catCache['__imported__'] = cat.id;
+        }
+        return catCache['__imported__'];
       }
       let parentId = null;
       let cacheKey = '';
@@ -299,17 +323,20 @@ app.post('/api/import', upload.array('files'), async (req, res) => {
       return parentId;
     }
 
-    // Save assets first, build name -> url map
+    // Save all assets to disk first
     const assetMap = {};
     for (const asset of assetFiles) {
       const ext = path.extname(asset.name);
       const filename = `${randomUUID()}${ext}`;
       const filePath = path.join(UPLOADS_DIR, filename);
       await fs.writeFile(filePath, asset.buffer);
-      assetMap[asset.name] = `/uploads/${filename}`;
+      const entry = { url: `/uploads/${filename}`, filename, filePath, mime: getMime(ext), size: asset.buffer.length };
+      assetMap[asset.name] = entry;
+      if (asset.zipPath && path.basename(asset.zipPath) !== asset.name) {
+        assetMap[path.basename(asset.zipPath)] = entry;
+      }
     }
 
-    // Save pages, rewriting Obsidian ![[links]]
     const results = [];
     for (const f of mdFiles) {
       const catId = await getCategoryForPath(f.path);
@@ -317,14 +344,15 @@ app.post('/api/import', upload.array('files'), async (req, res) => {
         'SELECT COALESCE(MAX(sort_order), 0) + 1 AS next FROM pages WHERE category_id=$1', [catId]
       );
 
+      // Rewrite Obsidian ![[links]]
       let content = f.content;
       content = content.replace(/!\[\[([^\]]+)\]\]/g, (_, name) => {
-        const url = assetMap[name] || assetMap[path.basename(name)];
-        if (!url) return `\`[missing: ${name}]\``;
+        const asset = assetMap[name] || assetMap[path.basename(name)];
+        if (!asset) return `\`[missing: ${name}]\``;
         const ext = path.extname(name).toLowerCase();
         return ['.png','.jpg','.jpeg','.gif','.webp','.svg'].includes(ext)
-          ? `![${name}](${url})`
-          : `[${name}](${url})`;
+          ? `![${name}](${asset.url})`
+          : `[${name}](${asset.url})`;
       });
 
       const { rows } = await client.query(
@@ -333,20 +361,30 @@ app.post('/api/import', upload.array('files'), async (req, res) => {
       );
 
       if (rows[0]) {
-        // Record attachments referenced by this page
-        for (const asset of assetFiles.filter(a => f.content.includes(a.name))) {
-          const url = assetMap[asset.name];
-          if (!url) continue;
-          const filename = path.basename(url);
-          const filePath = path.join(UPLOADS_DIR, filename);
-          const ext = path.extname(asset.name).toLowerCase();
-          const mime = ext === '.pdf' ? 'application/pdf' : `image/${ext.slice(1).replace('jpg', 'jpeg')}`;
+        // Record referenced attachments
+        for (const asset of assetFiles) {
+          if (!f.content.includes(asset.name) && !f.content.includes(path.basename(asset.zipPath || ''))) continue;
+          const saved = assetMap[asset.name];
+          if (!saved) continue;
           await client.query(
             'INSERT INTO attachments (page_id, filename, original_name, mime_type, size, path) VALUES ($1,$2,$3,$4,$5,$6)',
-            [rows[0].id, filename, asset.name, mime, asset.buffer.length, filePath]
+            [rows[0].id, saved.filename, asset.name, saved.mime, saved.size, saved.filePath]
           );
         }
         results.push({ id: rows[0].id, title: f.name });
+      }
+    }
+
+    // Also record any standalone assets (not referenced by any md file) under no page
+    for (const asset of assetFiles) {
+      const isReferenced = mdFiles.some(f => f.content.includes(asset.name));
+      if (!isReferenced) {
+        const saved = assetMap[asset.name];
+        if (!saved) continue;
+        await client.query(
+          'INSERT INTO attachments (page_id, filename, original_name, mime_type, size, path) VALUES ($1,$2,$3,$4,$5,$6)',
+          [null, saved.filename, asset.name, saved.mime, saved.size, saved.filePath]
+        );
       }
     }
 
@@ -354,6 +392,7 @@ app.post('/api/import', upload.array('files'), async (req, res) => {
     res.json({ imported: results.length, pages: results });
   } catch (e) {
     await client.query('ROLLBACK');
+    console.error('Import error:', e);
     res.status(500).json({ error: e.message });
   } finally {
     client.release();

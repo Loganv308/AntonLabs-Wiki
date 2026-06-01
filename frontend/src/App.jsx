@@ -42,6 +42,14 @@ const styles = css`
   .sort-option:hover { background: var(--bg3); color: var(--text); }
   .sort-option.active { color: var(--accent); }
 
+  .group-delete-btn {
+    opacity: 0; cursor: pointer; color: var(--text3);
+    display: flex; align-items: center; padding: 2px;
+    border-radius: 3px; transition: all .1s;
+  }
+  .cat-row:hover .group-delete-btn { opacity: .5; }
+  .group-delete-btn:hover { opacity: 1 !important; color: #f87171; background: rgba(248,113,113,.1); }
+
   .search-wrap { padding: 8px 10px 4px; position: relative; }
   .search-wrap input { width: 100%; padding-left: 26px; font-size: 11.5px; }
   .search-icon { position: absolute; left: 18px; top: 50%; transform: translateY(-50%); opacity: .4; pointer-events: none; }
@@ -113,6 +121,17 @@ const styles = css`
   }
   .attach-badge.img { background: #1a3a2a; color: #4ade80; }
   .attach-badge.pdf { background: #3a1a1a; color: #f87171; }
+
+  .root-drop-target {
+    height: 6px; margin: 4px 12px; border-radius: 3px;
+    background: transparent; transition: background .15s;
+    border: 2px dashed transparent;
+  }
+  .root-drop-target.active {
+    background: var(--accent-dim);
+    border-color: var(--accent);
+    height: 24px;
+  }
 
   /* ── Preview modal ── */
   .preview-overlay {
@@ -366,7 +385,7 @@ function SidebarAttachments({ onPreview }) {
 
 // ── TreeNode ─────────────────────────────────────────────────────────────────
 function TreeNode({ node, pages, current, collapsed, onToggle, onSelect, depth,
-                    sortMode, onDrop, dragState, setDragState }) {
+                    sortMode, onDrop, dragState, setDragState, onDeleteGroup }) {
   const nodePages = sortPages(pages.filter(p => p.category_id === node.id), sortMode);
   const sortedChildren = sortGroups(node.children || [], sortMode);
   const isOpen = !collapsed[node.id];
@@ -395,7 +414,7 @@ function TreeNode({ node, pages, current, collapsed, onToggle, onSelect, depth,
       <div
         className={`cat-row${isDraggingOver ? ' drag-over' : ''}`}
         style={{ paddingLeft: 12 + indent }}
-        draggable={sortMode === 'manual'}
+        draggable
         onDragStart={onGroupDragStart}
         onDragOver={onGroupDragOver}
         onDragLeave={onGroupDragLeave}
@@ -403,16 +422,23 @@ function TreeNode({ node, pages, current, collapsed, onToggle, onSelect, depth,
         onClick={() => onToggle(node.id)}
       >
         <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-          {sortMode === 'manual' && (
-            <span className="drag-handle" onClick={e => e.stopPropagation()}>
-              <Icon d={ICONS.grip} size={11} />
-            </span>
-          )}
+          <span className="drag-handle" onClick={e => e.stopPropagation()}>
+            <Icon d={ICONS.grip} size={11} />
+          </span>
           <Icon d={ICONS.folder} size={11} />
           {node.name}
         </span>
-        <span className={`cat-arrow ${isOpen ? 'open' : ''}`}>
-          <Icon d={ICONS.chevron} size={11} />
+        <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <span
+            className="group-delete-btn"
+            onClick={e => { e.stopPropagation(); onDeleteGroup(node.id, node.name); }}
+            title="Delete group"
+          >
+            <Icon d={ICONS.trash} size={11} />
+          </span>
+          <span className={`cat-arrow ${isOpen ? 'open' : ''}`}>
+            <Icon d={ICONS.chevron} size={11} />
+          </span>
         </span>
       </div>
 
@@ -430,6 +456,7 @@ function TreeNode({ node, pages, current, collapsed, onToggle, onSelect, depth,
               node={child} pages={pages} current={current} collapsed={collapsed}
               onToggle={onToggle} onSelect={onSelect} depth={depth + 1}
               sortMode={sortMode} onDrop={onDrop} dragState={dragState} setDragState={setDragState}
+              onDeleteGroup={onDeleteGroup}
             />
           </React.Fragment>
         ))}
@@ -450,13 +477,13 @@ function TreeNode({ node, pages, current, collapsed, onToggle, onSelect, depth,
             <div
               className={`page-row${current?.id === p.id ? ' active' : ''}${dragState.type === 'page' && dragState.id === p.id ? ' dragging' : ''}`}
               style={{ paddingLeft: 20 + indent }}
-              draggable={sortMode === 'manual'}
+              draggable
               onDragStart={e => { setDragState({ type: 'page', id: p.id, groupId: node.id }); e.dataTransfer.effectAllowed = 'move'; }}
               onDragEnd={() => setDragState({})}
               onClick={() => onSelect(p)}
               title={p.title}
             >
-              {sortMode === 'manual' && <span className="drag-handle"><Icon d={ICONS.grip} size={11} /></span>}
+              <span className="drag-handle"><Icon d={ICONS.grip} size={11} /></span>
               <Icon d={ICONS.file} size={12} />
               {p.title}
             </div>
@@ -464,7 +491,7 @@ function TreeNode({ node, pages, current, collapsed, onToggle, onSelect, depth,
         ))}
 
         <DropZone
-          show={sortMode === 'manual'}
+          show
           active={dragState.overZone === `end-${node.id}`}
           onDragOver={() => setDragState(s => ({ ...s, overZone: `end-${node.id}` }))}
           onDragLeave={() => setDragState(s => ({ ...s, overZone: null }))}
@@ -518,6 +545,8 @@ export default function App() {
   const [previewAttachment, setPreviewAttachment] = useState(null);
   const searchTimer = useRef(null);
   const sortMenuRef = useRef(null);
+  const [attachHeight, setAttachHeight] = useState(180);
+  const attachDragRef = useRef(null);
 
   const loadAll = useCallback(async (q = '') => {
     try {
@@ -551,7 +580,13 @@ export default function App() {
   const sortedTopLevel = sortGroups(tree, sortMode);
 
   async function handleDrop(action) {
-    if (action.type === 'page-to-group') {
+    setSortMode('manual');
+
+    if (action.type === 'group-to-root') {
+      // Move group to top level (parent_id = null)
+      const maxOrder = sortedTopLevel.reduce((m, n) => Math.max(m, n.sort_order ?? 0), 0);
+      await api.moveCategory(action.groupId, null, maxOrder + 1);
+    } else if (action.type === 'page-to-group') {
       const groupPages = pages.filter(p => p.category_id === action.groupId);
       const maxOrder = groupPages.reduce((m, p) => Math.max(m, p.sort_order ?? 0), 0);
       await api.movePage(action.pageId, action.groupId, maxOrder + 1);
@@ -632,6 +667,13 @@ export default function App() {
     setNewGroup({ name: '', parent_id: '' });
   }
 
+  async function handleDeleteGroup(id, name) {
+    if (!confirm(`Delete group "${name}"? Pages inside will also be deleted.`)) return;
+    await api.deleteCategory(id);
+    if (current && !pages.find(p => p.id === current.id)) setCurrent(null);
+    await loadAll(search);
+  }
+
   const toggleCat = (id) => setCollapsed(c => ({ ...c, [id]: !c[id] }));
   const currentSort = SORT_MODES.find(m => m.key === sortMode);
 
@@ -676,35 +718,71 @@ export default function App() {
             <input value={search} onChange={e => onSearch(e.target.value)} placeholder="Search…" style={{ paddingLeft: 28 }} />
           </div>
 
-          <div className="tree">
+          <div
+            className="tree"
+            onDragOver={e => { e.preventDefault(); }}
+            onDragLeave={() => setDragState(s => ({ ...s, overZone: null }))}
+            onDrop={e => {
+              e.preventDefault();
+              if (dragState.type === 'group') handleDrop({ type: 'group-to-root', groupId: dragState.id });
+              setDragState({});
+            }}
+          >
             {loading && <div style={{ padding: '16px', color: 'var(--text3)', fontSize: 11 }}>Loading…</div>}
+
             {sortedTopLevel.map((node, idx) => (
               <React.Fragment key={node.id}>
                 <DropZone
-                  show={sortMode === 'manual'}
+                  show
                   active={dragState.overZone === `top-${idx}`}
                   onDragOver={() => setDragState(s => ({ ...s, overZone: `top-${idx}` }))}
                   onDragLeave={() => setDragState(s => ({ ...s, overZone: null }))}
-                  onDrop={() => { if (dragState.type === 'group') handleDrop({ type: 'group-reorder', groupId: dragState.id, parentId: null, beforeId: node.id }); setDragState({}); }}
+                  onDrop={() => {
+                    if (dragState.type === 'group') handleDrop({ type: 'group-reorder', groupId: dragState.id, parentId: null, beforeId: node.id });
+                    setDragState({});
+                  }}
                 />
                 <TreeNode
                   node={node} pages={pages} current={current} collapsed={collapsed}
                   onToggle={toggleCat} onSelect={selectPage} depth={0}
                   sortMode={sortMode} onDrop={handleDrop} dragState={dragState} setDragState={setDragState}
+                  onDeleteGroup={handleDeleteGroup}
                 />
               </React.Fragment>
             ))}
+
             <DropZone
-              show={sortMode === 'manual'}
+              show
               active={dragState.overZone === 'top-end'}
               onDragOver={() => setDragState(s => ({ ...s, overZone: 'top-end' }))}
               onDragLeave={() => setDragState(s => ({ ...s, overZone: null }))}
-              onDrop={() => { if (dragState.type === 'group') handleDrop({ type: 'group-reorder', groupId: dragState.id, parentId: null, beforeId: null }); setDragState({}); }}
+              onDrop={() => {
+                if (dragState.type === 'group') handleDrop({ type: 'group-reorder', groupId: dragState.id, parentId: null, beforeId: null });
+                setDragState({});
+              }}
             />
           </div>
+          
+          <div
+            style={{
+              height: 4, cursor: 'ns-resize', background: 'transparent',
+              borderTop: '1px solid var(--border)', flexShrink: 0,
+            }}
+            onMouseDown={e => {
+              e.preventDefault();
+              const startY = e.clientY;
+              const startH = attachHeight;
+              function onMove(e) { setAttachHeight(Math.max(60, Math.min(500, startH - (e.clientY - startY)))); }
+              function onUp() { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); }
+              window.addEventListener('mousemove', onMove);
+              window.addEventListener('mouseup', onUp);
+            }}
+          />
 
           {/* ── Attachments section ── */}
-          <SidebarAttachments onPreview={setPreviewAttachment} />
+          <div style={{ height: attachHeight, flexShrink: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+            <SidebarAttachments onPreview={setPreviewAttachment} />
+          </div>
 
           <div className="sidebar-btns">
             <button className="new-btn" onClick={() => setGroupModal(true)}>
@@ -756,8 +834,8 @@ export default function App() {
                 <span className="editor-hint">Supports Markdown: headings, code blocks, tables, lists, bold, italic</span>
               </div>
             )}
-          </div>
-        </div>
+          </div>       {/* closes .content */}
+        </div>         {/* closes .main */}
       </div>
 
       {/* ── Preview modal ── */}

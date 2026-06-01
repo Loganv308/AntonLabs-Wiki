@@ -32,5 +32,6 @@ export const api = {
   deleteAttachment:(id)                           => req('DELETE', `/attachments/${id}`),
   importPreview:   (formData)                     => upload('/import/preview', formData),
   importCommit:    (formData)                     => upload('/import', formData),
-  allAttachments:  ()                             => req('GET', '/attachments'),
+  allAttachments:  ()                             => req('GET', '/attachments/all'),
+  deleteCategory:  (id)                           => req('DELETE', `/categories/${id}`),
 };
