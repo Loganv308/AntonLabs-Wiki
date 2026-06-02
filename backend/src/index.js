@@ -34,6 +34,8 @@ function getMime(ext) {
   return map[ext.toLowerCase()] || 'application/octet-stream';
 }
 
+app.use(express.static(path.join(__dirname, '../public')));
+
 // ── Health ───────────────────────────────────────────────────────────────────
 app.get('/api/health', async (req, res) => {
   try { await pool.query('SELECT 1'); res.json({ ok: true }); }
@@ -397,6 +399,10 @@ app.post('/api/import', upload.array('files'), async (req, res) => {
   } finally {
     client.release();
   }
+});
+
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, '../public', 'index.html'));
 });
 
 app.listen(port, () => console.log(`Wiki API listening on :${port}`));
